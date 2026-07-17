@@ -1,0 +1,10 @@
+{
+  "name": "TradePlan AI Indonesia",
+  "short_name": "TradePlan AI",
+  "description": "Analisis screenshot saham dan trading plan harian Indonesia",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07111f",
+  "theme_color": "#07111f",
+  "icons": []
+}
