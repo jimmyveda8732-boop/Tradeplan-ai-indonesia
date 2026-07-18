@@ -155,6 +155,7 @@ export default function Home() {
   const [modal, setModal] = useState("10000000");
   const [tradingMode, setTradingMode] = useState<TradingMode>("PAGI_SORE");
   const [loading, setLoading] = useState(false);
+  const [loadingText, setLoadingText] = useState("");
   const [plan, setPlan] = useState<TradingPlan | null>(null);
   const [error, setError] = useState("");
   const [saveStatus, setSaveStatus] = useState("");
@@ -175,6 +176,85 @@ export default function Home() {
       return `${file.name} melebihi 8 MB.`;
     }
     return "";
+  }
+
+  function resizeDimensions(width: number, height: number) {
+    const maxEdge = Math.max(width, height);
+    if (maxEdge <= 1600) {
+      return { width, height };
+    }
+    const ratio = 1600 / maxEdge;
+    return {
+      width: Math.round(width * ratio),
+      height: Math.round(height * ratio),
+    };
+  }
+
+  async function compressImage(file: File): Promise<File> {
+    const fileDataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Gagal membaca file gambar."));
+      reader.onload = () => resolve(reader.result as string);
+      reader.readAsDataURL(file);
+    });
+
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Gagal memuat gambar."));
+      img.src = fileDataUrl;
+    });
+
+    const { width, height } = resizeDimensions(image.naturalWidth, image.naturalHeight);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("Canvas tidak tersedia untuk kompresi gambar.");
+    }
+
+    ctx.drawImage(image, 0, 0, width, height);
+
+    const maxBytes = 600 * 1024;
+    let quality = 0.65;
+    let blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (result) => {
+          if (!result) {
+            reject(new Error("Gagal membuat hasil gambar."));
+          } else {
+            resolve(result);
+          }
+        },
+        "image/jpeg",
+        quality,
+      );
+    });
+
+    while (blob.size > maxBytes && quality > 0.4) {
+      quality = Math.max(0.4, quality - 0.05);
+      blob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob(
+          (result) => {
+            if (!result) {
+              reject(new Error("Gagal membuat hasil gambar."));
+            } else {
+              resolve(result);
+            }
+          },
+          "image/jpeg",
+          quality,
+        );
+      });
+      if (quality === 0.4) {
+        break;
+      }
+    }
+
+    const outputName = file.name.replace(/\.(png|jpe?g|webp)$/i, ".jpg");
+    return new File([blob], outputName, { type: "image/jpeg" });
   }
 
   function handleFileChange(key: MarketCategoryKey, e: ChangeEvent<HTMLInputElement>) {
@@ -253,15 +333,25 @@ export default function Home() {
     }
 
     setLoading(true);
+    setLoadingText("Mengompres screenshot...");
 
     try {
       const form = new FormData();
-      if (uploads.ihsg) form.append("ihsg", uploads.ihsg);
-      if (uploads.topGainer) form.append("topGainer", uploads.topGainer);
-      if (uploads.topLoser) form.append("topLoser", uploads.topLoser);
-      if (uploads.topVolume) form.append("topVolume", uploads.topVolume);
-      if (uploads.foreignBuy) form.append("foreignBuy", uploads.foreignBuy);
-      if (uploads.foreignSell) form.append("foreignSell", uploads.foreignSell);
+      const compressedUploads: Partial<UploadFiles> = {};
+
+      for (const key of Object.keys(uploads) as MarketCategoryKey[]) {
+        const file = uploads[key];
+        if (file) {
+          compressedUploads[key] = await compressImage(file);
+        }
+      }
+
+      if (compressedUploads.ihsg) form.append("ihsg", compressedUploads.ihsg);
+      if (compressedUploads.topGainer) form.append("topGainer", compressedUploads.topGainer);
+      if (compressedUploads.topLoser) form.append("topLoser", compressedUploads.topLoser);
+      if (compressedUploads.topVolume) form.append("topVolume", compressedUploads.topVolume);
+      if (compressedUploads.foreignBuy) form.append("foreignBuy", compressedUploads.foreignBuy);
+      if (compressedUploads.foreignSell) form.append("foreignSell", compressedUploads.foreignSell);
       form.append("modal", modal);
       form.append("risk", risk);
       form.append("tradingMode", tradingMode);
@@ -290,6 +380,7 @@ export default function Home() {
       }
     } finally {
       setLoading(false);
+      setLoadingText("");
     }
   }
 
@@ -488,7 +579,7 @@ export default function Home() {
               <a href="#analisis" className="primaryButton">
                 Analisis Sekarang
               </a>
-              <span>PNG, JPG, WEBP | Maks. 8 MB per file</span>
+              <span>PNG/JPG/WEBP, otomatis dikompres.</span>
             </div>
           </div>
 
@@ -609,7 +700,7 @@ export default function Home() {
               {error && <div className="errorMessage">{error}</div>}
 
               <button type="submit" className="analyzeButton" disabled={loading || !uploads.ihsg}>
-                {loading ? "Gemini sedang menganalisis..." : "Mulai Analisis AI"}
+                {loading ? (loadingText || "Gemini sedang menganalisis...") : "Mulai Analisis AI"}
               </button>
             </div>
 
