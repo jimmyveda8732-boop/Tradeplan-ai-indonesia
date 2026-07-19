@@ -401,8 +401,14 @@ export default function Home() {
             fileName: file.name,
           });
         } catch (uploadError) {
-          failedCategories.push(CATEGORY_LABELS[key]);
-        }
+  const message =
+    uploadError instanceof Error
+      ? uploadError.message
+      : String(uploadError);
+
+  console.error(`Upload ${CATEGORY_LABELS[key]} gagal:`, uploadError);
+  failedCategories.push(`${CATEGORY_LABELS[key]} — ${message}`);
+}
       }
 
       if (failedCategories.length) {
