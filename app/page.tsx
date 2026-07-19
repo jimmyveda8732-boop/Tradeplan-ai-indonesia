@@ -96,7 +96,24 @@ type UploadFiles = {
   foreignSell: File | null;
 };
 
-const MAX_SIZE = 8 * 1024 * 1024;
+type UploadedImage = {
+  category: string;
+  url: string;
+  fileName: string;
+};
+
+const BUCKET_NAME = "tradeplan-screenshots";
+
+const CATEGORY_LABELS: Record<MarketCategoryKey, string> = {
+  ihsg: "IHSG",
+  topGainer: "Top Gainer",
+  topLoser: "Top Loser",
+  topVolume: "Top Volume",
+  foreignBuy: "Net Foreign Buy",
+  foreignSell: "Net Foreign Sell",
+};
+
+const MAX_SIZE = 15 * 1024 * 1024;
 
 const CATEGORIES: Array<{
   key: MarketCategoryKey;
@@ -173,7 +190,7 @@ export default function Home() {
       return "Semua file harus berupa gambar PNG, JPG, atau WEBP.";
     }
     if (file.size > MAX_SIZE) {
-      return `${file.name} melebihi 8 MB.`;
+      return `${file.name} melebihi 15 MB.`;
     }
     return "";
   }
@@ -257,6 +274,36 @@ export default function Home() {
     return new File([blob], outputName, { type: "image/jpeg" });
   }
 
+  function sanitizeFileName(fileName: string) {
+    return fileName
+      .replace(/[^a-zA-Z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  }
+
+  async function uploadFileToStorage(key: MarketCategoryKey, file: File) {
+    const categoryLabel = CATEGORY_LABELS[key];
+    const sanitizedFileName = sanitizeFileName(file.name);
+    const path = `anonymous/${Date.now()}-${categoryLabel.replace(/\s+/g, "-")}-${sanitizedFileName}`;
+
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from(BUCKET_NAME)
+      .upload(path, file, { upsert: true });
+
+    if (uploadError || !uploadData?.path) {
+      throw uploadError ?? new Error(`Unggah ${categoryLabel} gagal.`);
+    }
+
+    const urlResult = supabase.storage
+      .from(BUCKET_NAME)
+      .getPublicUrl(uploadData.path);
+
+    if (!urlResult.data?.publicUrl) {
+      throw new Error(`Tidak dapat membuat URL publik untuk ${categoryLabel}.`);
+    }
+
+    return urlResult.data.publicUrl;
+  }
+
   function handleFileChange(key: MarketCategoryKey, e: ChangeEvent<HTMLInputElement>) {
     setError("");
     setPlan(null);
@@ -333,34 +380,55 @@ export default function Home() {
     }
 
     setLoading(true);
-    setLoadingText("Mengompres screenshot...");
+    setLoadingText("Mengunggah screenshot...");
 
     try {
-      const form = new FormData();
-      const compressedUploads: Partial<UploadFiles> = {};
+      const images: UploadedImage[] = [];
+      const failedCategories: string[] = [];
 
       for (const key of Object.keys(uploads) as MarketCategoryKey[]) {
         const file = uploads[key];
-        if (file) {
-          compressedUploads[key] = await compressImage(file);
+        if (!file) {
+          continue;
+        }
+
+        try {
+          const compressedFile = await compressImage(file);
+          const publicUrl = await uploadFileToStorage(key, compressedFile);
+          images.push({
+            category: CATEGORY_LABELS[key],
+            url: publicUrl,
+            fileName: file.name,
+          });
+        } catch (uploadError) {
+          failedCategories.push(CATEGORY_LABELS[key]);
         }
       }
 
-      if (compressedUploads.ihsg) form.append("ihsg", compressedUploads.ihsg);
-      if (compressedUploads.topGainer) form.append("topGainer", compressedUploads.topGainer);
-      if (compressedUploads.topLoser) form.append("topLoser", compressedUploads.topLoser);
-      if (compressedUploads.topVolume) form.append("topVolume", compressedUploads.topVolume);
-      if (compressedUploads.foreignBuy) form.append("foreignBuy", compressedUploads.foreignBuy);
-      if (compressedUploads.foreignSell) form.append("foreignSell", compressedUploads.foreignSell);
-      form.append("modal", modal);
-      form.append("risk", risk);
-      form.append("tradingMode", tradingMode);
+      if (failedCategories.length) {
+        throw new Error(`Gagal mengunggah screenshot: ${failedCategories.join(", ")}`);
+      }
+
+      if (!images.some((image) => image.category === "IHSG")) {
+        throw new Error("IHSG wajib diunggah.");
+      }
+
+      setLoadingText("Membaca data pasar...");
 
       const response = await fetch("/api/analyze", {
         method: "POST",
-        body: form,
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          modal,
+          risk,
+          tradingMode,
+          images,
+        }),
       });
 
+      setLoadingText("Menyusun trading plan...");
       const data: ApiResponse = await response.json();
       if (!response.ok || !data.success) {
         throw new Error(data.message ?? "Analisis gagal.");
@@ -684,7 +752,7 @@ export default function Home() {
                             onChange={(e) => handleFileChange(key, e)}
                           />
                           <span>{file ? file.name : `Unggah ${label}`}</span>
-                          <small>PNG/JPG/WEBP, maksimal 8 MB.</small>
+                          <small>PNG/JPG/WEBP, maksimal 15 MB.</small>
                         </label>
                         {file && (
                           <button type="button" className="removeFileSmall" onClick={() => removeFile(key)}>
@@ -719,7 +787,7 @@ export default function Home() {
               {loading ? (
                 <div className="resultState">
                   <span className="spinner" />
-                  <strong>Gemini sedang membaca screenshot</strong>
+                  <strong>{loadingText || "Gemini sedang menyiapkan analisis..."}</strong>
                   <p>Harap tunggu dan jangan tutup halaman ini.</p>
                 </div>
               ) : plan ? (

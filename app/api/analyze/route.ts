@@ -1,10 +1,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from "next/server";
 
-const MAX_FILE_SIZE = 8 * 1024 * 1024;
-const MAX_TOTAL_FILE_SIZE = 24 * 1024 * 1024;
-const ACCEPTED_TYPES = ["image/png", "image/jpeg", "image/webp"];
 const MODEL_NAME = "gemini-2.5-flash-lite";
+const ACCEPTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
 
 type GeminiPart = { text: string } | { inlineData: { mimeType: string; data: string } };
 
@@ -13,21 +11,12 @@ type GeminiError = Error & {
   code?: string;
 };
 
-function validateImage(file: unknown) {
-  if (!(file instanceof File)) {
-    return { valid: false, message: "File tidak valid." };
-  }
-  if (file.size === 0) {
-    return { valid: false, message: `${file.name} kosong.` };
-  }
-  if (!file.type || !ACCEPTED_TYPES.includes(file.type)) {
-    return { valid: false, message: "Semua file harus berupa gambar PNG, JPG, atau WEBP." };
-  }
-  if (file.size > MAX_FILE_SIZE) {
-    return { valid: false, message: `${file.name} melebihi batas 8 MB.` };
-  }
-  return { valid: true, message: "" };
-}
+type AnalyzeRequestBody = {
+  modal: string;
+  risk: string;
+  tradingMode: string;
+  images: Array<{ category: string; url: string; fileName: string }>;
+};
 
 function normalizeJsonResponse(text: string) {
   const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -43,91 +32,78 @@ function normalizeJsonResponse(text: string) {
   return trimmed;
 }
 
-async function buildImagePart(label: string, file: File) {
-  const arrayBuffer = await file.arrayBuffer();
-  const base64 = Buffer.from(arrayBuffer).toString("base64");
+async function downloadImageAsBase64(url: string) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Gagal mengunduh gambar dari ${url}`);
+  }
 
-  return [
-    { text: `Screenshot berikut adalah ${label}.` },
-    {
-      inlineData: {
-        mimeType: file.type,
-        data: base64,
-      },
-    },
-  ] as GeminiPart[];
+  const contentType = res.headers.get("content-type") ?? "image/jpeg";
+  if (!ACCEPTED_IMAGE_TYPES.includes(contentType)) {
+    throw new Error(`Tipe gambar tidak didukung: ${contentType}`);
+  }
+
+  const buffer = await res.arrayBuffer();
+  const base64 = Buffer.from(buffer).toString("base64");
+  return { mimeType: contentType, base64 };
 }
 
 export async function POST(request: Request) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return NextResponse.json({ success: false, message: "GEMINI_API_KEY belum terbaca." }, { status: 500 });
+  }
+
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json({ success: false, message: "GEMINI_API_KEY belum terbaca." }, { status: 500 });
+    const body = (await request.json()) as AnalyzeRequestBody;
+    const modal = String(body.modal ?? "0");
+    const risk = String(body.risk ?? "Moderat");
+    const tradingMode = String(body.tradingMode ?? "PAGI_SORE");
+    const images = Array.isArray(body.images) ? body.images : [];
+
+    if (!images.length) {
+      return NextResponse.json({ success: false, message: "Minimal satu screenshot harus dikirim." }, { status: 400 });
     }
 
-    const formData = await request.formData();
-    const modal = String(formData.get("modal") ?? "0");
-    const risk = String(formData.get("risk") ?? "Moderat");
-    const tradingMode = String(formData.get("tradingMode") ?? "PAGI_SORE");
+    const imageParts: GeminiPart[] = [];
+    const failedImages: string[] = [];
+    const downloadedCategories: string[] = [];
 
-    const fileFields = [
-      ["ihsg", formData.get("ihsg")],
-      ["topGainer", formData.get("topGainer")],
-      ["topLoser", formData.get("topLoser")],
-      ["topVolume", formData.get("topVolume")],
-      ["foreignBuy", formData.get("foreignBuy")],
-      ["foreignSell", formData.get("foreignSell")],
-    ] as Array<[string, FormDataEntryValue | null]>;
-
-    const files: Array<[string, File]> = [];
-    let totalSize = 0;
-
-    for (const [fieldName, value] of fileFields) {
-      if (value === null) {
+    for (const image of images) {
+      if (!image.url || !image.category || !image.fileName) {
+        failedImages.push(image.category ?? "kategori tidak dikenal");
         continue;
       }
 
-      if (!(value instanceof File)) {
-        return NextResponse.json({ success: false, message: `Field ${fieldName} harus berisi file gambar.` }, { status: 400 });
+      try {
+        const { mimeType, base64 } = await downloadImageAsBase64(image.url);
+        imageParts.push({ text: `Screenshot berikut adalah ${image.category}.` });
+        imageParts.push({ inlineData: { mimeType, data: base64 } });
+        downloadedCategories.push(image.category);
+      } catch (error) {
+        failedImages.push(image.category);
       }
-
-      const validation = validateImage(value);
-      if (!validation.valid) {
-        return NextResponse.json({ success: false, message: validation.message }, { status: 400 });
-      }
-
-      files.push([fieldName, value]);
-      totalSize += value.size;
     }
 
-    if (files.length === 0 || !files.some(([fieldName]) => fieldName === "ihsg")) {
-      return NextResponse.json({ success: false, message: "IHSG wajib diunggah." }, { status: 400 });
+    if (!downloadedCategories.length) {
+      return NextResponse.json(
+        { success: false, message: "Tidak ada screenshot yang berhasil dibaca." },
+        { status: 400 }
+      );
     }
 
-    if (totalSize > MAX_TOTAL_FILE_SIZE) {
-      return NextResponse.json({ success: false, message: "Total ukuran gambar melebihi batas yang diizinkan." }, { status: 400 });
+    if (!downloadedCategories.includes("IHSG")) {
+      return NextResponse.json(
+        { success: false, message: "IHSG wajib disertakan dan dapat dibaca." },
+        { status: 400 }
+      );
     }
-
-    console.info("[analyze] request received", {
-      model: MODEL_NAME,
-      imageCount: files.length,
-      images: files.map(([fieldName, file]) => ({
-        fieldName,
-        mimeType: file.type,
-        size: file.size,
-        name: file.name,
-      })),
-    });
 
     const labeledParts: GeminiPart[] = [];
     labeledParts.push({ text: `Modal pengguna: Rp${modal}. Profil risiko: ${risk}. Mode trading: ${tradingMode}.` });
     labeledParts.push({ text: "Baca hanya informasi yang terlihat di screenshot. Jangan mengarang angka atau harga yang tidak terlihat." });
     labeledParts.push({ text: "Balas hanya JSON murni tanpa markdown, tanpa penjelasan tambahan, dan gunakan Bahasa Indonesia singkat." });
-
-    for (const [label, file] of files) {
-      const imageParts = await buildImagePart(label, file);
-      labeledParts.push(...imageParts);
-    }
+    labeledParts.push(...imageParts);
 
     const modeInstructionsByMode: Record<string, string> = {
       SCALPING: `
@@ -193,7 +169,12 @@ export async function POST(request: Request) {
     });
 
     const ai = new GoogleGenAI({ apiKey });
-    console.info("[analyze] calling Gemini", { model: MODEL_NAME, imageCount: files.length });
+    console.info("[analyze] request received", {
+      model: MODEL_NAME,
+      imageCount: downloadedCategories.length,
+      images: images.map((image) => ({ category: image.category, url: image.url, fileName: image.fileName })),
+      failedImages,
+    });
 
     const response = await ai.models.generateContent({
       model: MODEL_NAME,
@@ -223,7 +204,7 @@ export async function POST(request: Request) {
       throw new Error("Tidak ada saham yang berhasil terdeteksi.");
     }
 
-    return NextResponse.json({ success: true, totalImages: files.length, plan });
+    return NextResponse.json({ success: true, totalImages: images.length, plan });
   } catch (error) {
     const details =
       typeof error === "object" && error !== null && "status" in error
@@ -232,8 +213,8 @@ export async function POST(request: Request) {
           ? (error as GeminiError).code
           : undefined;
 
-    console.error("[analyze] Gemini request failed", {
-      stage: "generateContent",
+    console.error("[analyze] request failed", {
+      stage: "analyze",
       message: error instanceof Error ? error.message : "Unknown error",
       details,
     });
@@ -241,7 +222,7 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         success: false,
-        message: error instanceof Error ? error.message : "Terjadi kesalahan saat membuat dashboard.",
+        message: error instanceof Error ? error.message : "Terjadi kesalahan saat membuat analisis.",
         details,
       },
       { status: 500 }
