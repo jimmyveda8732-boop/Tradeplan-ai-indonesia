@@ -287,7 +287,7 @@ export default function Home() {
 
     const { data: uploadData, error: uploadError } = await supabase.storage
       .from(BUCKET_NAME)
-      .upload(path, file, { upsert: true });
+      .upload(path, file, { upsert: false });
 
     if (uploadError || !uploadData?.path) {
       throw uploadError ?? new Error(`Unggah ${categoryLabel} gagal.`);
