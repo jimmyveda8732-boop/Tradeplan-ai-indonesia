@@ -102,7 +102,7 @@ type UploadedImage = {
   fileName: string;
 };
 
-const BUCKET_NAME = "tradeplan-screenshots";
+const BUCKET_NAME = "Tradeplan-screenshots";
 
 const CATEGORY_LABELS: Record<MarketCategoryKey, string> = {
   ihsg: "IHSG",
